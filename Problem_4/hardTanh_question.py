@@ -46,11 +46,12 @@ class BoundHardTanh(nn.Hardtanh):
         preact_lb = self.lower_l
         preact_ub = self.upper_u
 
+        # TODO: Implement the linear lower and upper bounds for HardTanH you derived in Problem 4.2.
         """
          Hints: 
          1. Have a look at the section 3.2 of the CROWN paper [1] (Case Studies) as to how segments are made for multiple activation functions
          2. Look at the HardTanH graph, and see multiple places where the pre activation bounds could be located
-         3. Refer the ReLu example in the class and the diagonals to compute the slopes/intercepts
+         3. Refer the ReLu example in the class and the diagonals to compute the slopes(coefficients)/intercepts(bias)
          4. The paper talks about 3 segments S+, S- and S+- for sigmoid and tanh. You should figure your own segments based on preactivation bounds for hardtanh.
          [1] https://arxiv.org/pdf/1811.00866.pdf
         """
