@@ -45,7 +45,10 @@ class Verifier:
             x_vars: A list of input variables with initial upper and lower bounds created.
         """
         for i in range(len(x_test)):
-
+            # TODO : Append to x_vars - a list of variable having lower and upper bounds
+            # TODO : Hint - Use .addVar in gurobipy
+            # YOUR CODE HERE
+            # self.x_vars.append(self.gurobi_model.addVar(...))
             t_i = x_test[i].item()
             self.x_vars.append(
                 self.gurobi_model.addVar(
@@ -79,15 +82,14 @@ class Verifier:
         # Pre-activation variables z.
         z = self.gurobi_model.addVars(output_size, lb=float('-inf'), ub=float('inf'))
         self.gurobi_model.update()
-        
+        # TODO : Add constraints for variable z representing the output of the layer before activation i.e. wx + b
         for i in range(output_size):
-
+            # YOUR CODE HERE
             expr = gurobipy.LinExpr()
             for j, in_var in enumerate(input_vars):
                 expr.addTerms(float(weight[i][j].item()), in_var)
             expr.addConstant(float(bias[i].item()))
             self.gurobi_model.addConstr(z[i] == expr)
-
         self.gurobi_model.update()
         print(f"Created linear layer with input shape {input_size} output shape {output_size}")
         return z.values()
@@ -112,15 +114,20 @@ class Verifier:
         n_inputs = len(upper_bounds)
         hatz_vars = self.gurobi_model.addVars(n_inputs)
         # Some p variables will not be used if that neuron is stable.
-        p_vars = self.gurobi_model.addVars(n_inputs, vtype=gurobipy.GRB.BINARY)
+        p_vars = self.gurobi_model.addVars(n_inputs, lb=0.0, ub=1.0, vtype=gurobipy.GRB.CONTINUOUS)
         self.gurobi_model.update()
 
-       
+        # TODO: Model ReLU activation as piecewise linear constraints in MIP.
+        # You need to handle three cases for each neuron based on its pre-activation bounds:
+        # active (always positive), inactive (always non-positive), and unstable (can be either).
+        # Hint - Use .addConstr() and Refer section 4.1 of the paper
         n_unstable = 0
         for i in range(n_inputs):
-
+            # YOUR CODE HERE
             l_i = float(lower_bounds[i])
             u_i = float(upper_bounds[i])
+
+            # Update z bounds in the model (tighten big-M constants).
             z[i].LB = l_i
             z[i].UB = u_i
 
@@ -169,15 +176,23 @@ class Verifier:
                 optimal_vars.append(None)
                 continue
             start_time = time.time()
-            
+            # TODO : Add Gurobi objectives to the model
+            # Implement the objective solving step, where you optimize the verification objectives
+            # under the current model constraints. This step is essential for finding potential adversarial examples
+            # that satisfy the input constraints and maximize the output difference from the expected label.
+            # Hint - direction can either be 'minimzation' or 'maximization' and use self.gurobi_model.setObjective
             if direction == 'minimization':
+                # YOUR CODE HERE
+                # self.gurobi_model.setObjective(...)
                 self.gurobi_model.setObjective(objectives[i], gurobipy.GRB.MINIMIZE)
             elif direction == 'maximization':
+                # YOUR CODE HERE
                 self.gurobi_model.setObjective(objectives[i], gurobipy.GRB.MAXIMIZE)
             else:
                 raise ValueError(direction)
             self.gurobi_model.optimize()
-            
+            # In production-ready code, you should can check for infeasible solutions, timeout, etc here.
+            # TODO: Check if gurobi model is at optimal status
             assert self.gurobi_model.Status == gurobipy.GRB.OPTIMAL # YOUR CODE HERE
 
             optimal_objs.append(self.gurobi_model.objVal)
@@ -203,15 +218,21 @@ class Verifier:
 
         objectives = []
         target_labels = []
-        
+        # TODO : Formulate the verification objectives for the MIP model.
+        # This involves setting up the optimization targets to assess the neural network's output
+        # robustness against input perturbations, particularly focusing on how changes in input
+        # can lead to incorrect classifications.
         for i in range(len(y_vars)):
-
             target_labels.append(i)
-
             if i == groundtruth_label:
+                # YOUR CODE HERE
+                # objectives.append(...)
                 objectives.append(None)
                 continue
-        
+            # Optimization objective we want to minimize.
+            # TODO : append objective that needs to be minimized, think about the original label and the one after perturbation
+            # YOUR CODE HERE
+            # objectives.append(...)
             objectives.append(y_vars[groundtruth_label] - y_vars[i])
 
         return objectives, target_labels
@@ -277,7 +298,7 @@ def verify(model, input_image, groundtruth_label, perturbation):
         # For LP, below we print a lower bound of the objective rather than the true minimum.
         print(f'Minimum y_{groundtruth_label} - y{r} = {optimal_objs[i]:13.8g}; calculated margin = {margin:13.8g}')
         # The assertion is for MIP only. For LP, this assertion should be removed.
-        assert abs(margin - optimal_objs[i]) < 1e-2
+        # assert abs(margin - optimal_objs[i]) < 1e-2
         if optimal_objs[i] <= 0:
             verified = False
             print(
