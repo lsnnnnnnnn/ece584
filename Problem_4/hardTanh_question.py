@@ -16,11 +16,16 @@ class BoundHardTanh(nn.Hardtanh):
         Returns:
             l (BoundHardTanh): The converted layer object.
         """
-      
+    
         l = BoundHardTanh()
+
         l.min_val = act_layer.min_val
         l.max_val = act_layer.max_val
         l.inplace = act_layer.inplace
+
+        l.optimize_alpha = False
+        l.alpha_param = None
+
         return l
 
     def boundpropogate(self, last_uA, last_lA, start_node=None):
@@ -50,95 +55,115 @@ class BoundHardTanh(nn.Hardtanh):
         preact_lb = self.lower_l
         preact_ub = self.upper_u
 
+        l = preact_lb
+        u = preact_ub
         eps = 1e-8
-        upper_d = torch.zeros_like(preact_lb)
-        upper_b = torch.zeros_like(preact_lb)
-        lower_d = torch.zeros_like(preact_lb)
-        lower_b = torch.zeros_like(preact_lb)
 
-        mask_left = (preact_ub <= -1)
-        mask_right = (preact_lb >= 1)
-        mask_mid = (preact_lb >= -1) & (preact_ub <= 1)
-        mask_cross_left = (preact_lb < -1) & (preact_ub > -1) & (preact_ub <= 1)
-        mask_cross_right = (preact_lb >= -1) & (preact_lb < 1) & (preact_ub > 1)
-        mask_cross_both = (preact_lb < -1) & (preact_ub > 1)
+        upper_d = torch.zeros_like(l)
+        upper_b = torch.zeros_like(l)
+        lower_d = torch.zeros_like(l)
+        lower_b = torch.zeros_like(l)
 
-        # Case 1: Entirely in the left saturation region => y = -1.
-        upper_b = torch.where(mask_left, preact_lb.new_tensor(-1.0), upper_b)
-        lower_b = torch.where(mask_left, preact_lb.new_tensor(-1.0), lower_b)
+        # Case 1: fully in left saturation (y = -1)
+        mask_left = (u <= -1)
+        upper_b = torch.where(mask_left, l.new_tensor(-1.0), upper_b)
+        lower_b = torch.where(mask_left, l.new_tensor(-1.0), lower_b)
 
-        # Case 2: Entirely in the linear region => y = x.
-        upper_d = torch.where(mask_mid, preact_lb.new_tensor(1.0), upper_d)
-        lower_d = torch.where(mask_mid, preact_lb.new_tensor(1.0), lower_d)
+        # Case 2: fully in linear region (y = z)
+        mask_linear = (l >= -1) & (u <= 1)
+        upper_d = torch.where(mask_linear, l.new_tensor(1.0), upper_d)
+        lower_d = torch.where(mask_linear, l.new_tensor(1.0), lower_d)
 
-        # Case 3: Entirely in the right saturation region => y = 1.
-        upper_b = torch.where(mask_right, preact_lb.new_tensor(1.0), upper_b)
-        lower_b = torch.where(mask_right, preact_lb.new_tensor(1.0), lower_b)
+        # Case 3: fully in right saturation (y = 1)
+        mask_right = (l >= 1)
+        upper_b = torch.where(mask_right, l.new_tensor(1.0), upper_b)
+        lower_b = torch.where(mask_right, l.new_tensor(1.0), lower_b)
 
-        # Case 4: Cross -1 only (preact_lb < -1 < preact_ub <= 1).
+        # Case 4: crosses -1 only: l < -1 < u <= 1
+        mask_cross_left = (l < -1) & (u > -1) & (u <= 1)
         if mask_cross_left.any():
-            denom = (preact_ub - preact_lb).clamp(min=eps)
-            k = (preact_ub + 1.0) / denom
-            b = -1.0 - k * preact_lb
-            upper_d = torch.where(mask_cross_left, k, upper_d)
+            denom = (u - l).clamp(min=eps)
+            
+            s = (u + 1.0) / denom
+            b = -1.0 - s * l
+            upper_d = torch.where(mask_cross_left, s, upper_d)
             upper_b = torch.where(mask_cross_left, b, upper_b)
 
-            k_lower = (k > 0.5).float()
-            b_lower = k_lower - 1.0
-            lower_d = torch.where(mask_cross_left, k_lower, lower_d)
-            lower_b = torch.where(mask_cross_left, b_lower, lower_b)
+            if getattr(self, 'optimize_alpha', False):
+                # alpha-CROWN
+                if self.alpha_param is None:
+                    self.alpha_param = nn.Parameter(torch.zeros_like(l))
+                alpha = torch.sigmoid(self.alpha_param)
+                lower_d = torch.where(mask_cross_left, alpha, lower_d)
+                lower_b = torch.where(mask_cross_left, alpha - 1.0, lower_b)
+            else:
+                # Vanilla CROWN
+                choose = (s > 0.5).float()
+                lower_d = torch.where(mask_cross_left, choose, lower_d)
+                lower_b = torch.where(mask_cross_left, choose - 1.0, lower_b)
 
-        # Case 5: Cross 1 only (-1 <= preact_lb < 1 < preact_ub).
+        # Case 5: crosses 1 only: -1 <= l < 1 < u
+        mask_cross_right = (l >= -1) & (l < 1) & (u > 1)
         if mask_cross_right.any():
-            denom = (preact_ub - preact_lb).clamp(min=eps)
-            k = (1.0 - preact_lb) / denom
-            b = 1.0 - k * preact_ub
-            k_upper = (k > 0.5).float()
-            b_upper = 1.0 - k_upper
-            upper_d = torch.where(mask_cross_right, k_upper, upper_d)
-            upper_b = torch.where(mask_cross_right, b_upper, upper_b)
-
-            lower_d = torch.where(mask_cross_right, k, lower_d)
+            denom = (u - l).clamp(min=eps)
+            
+            s = (1.0 - l) / denom
+            b = 1.0 - s * u
+            lower_d = torch.where(mask_cross_right, s, lower_d)
             lower_b = torch.where(mask_cross_right, b, lower_b)
 
-        # Case 6: Cross both -1 and 1 (preact_lb < -1 and preact_ub > 1).
+            if getattr(self, 'optimize_alpha', False):
+                # alpha
+                if self.alpha_param is None:
+                    self.alpha_param = nn.Parameter(torch.zeros_like(l))
+                alpha = torch.sigmoid(self.alpha_param)
+                upper_d = torch.where(mask_cross_right, alpha, upper_d)
+                upper_b = torch.where(mask_cross_right, 1.0 - alpha, upper_b)
+            else:
+                # CROWN
+                choose = (s > 0.5).float()
+                upper_d = torch.where(mask_cross_right, choose, upper_d)
+                upper_b = torch.where(mask_cross_right, 1.0 - choose, upper_b)
+
+        # Case 6: crosses both -1 and 1: l < -1 and u > 1
+        mask_cross_both = (l < -1) & (u > 1)
         if mask_cross_both.any():
-            k_u = 2.0 / (1.0 - preact_lb).clamp(min=eps)
-            b_u = 1.0 - k_u
-            upper_d = torch.where(mask_cross_both, k_u, upper_d)
+            
+            s_u = 2.0 / (1.0 - l).clamp(min=eps)
+            b_u = 1.0 - s_u
+            upper_d = torch.where(mask_cross_both, s_u, upper_d)
             upper_b = torch.where(mask_cross_both, b_u, upper_b)
 
-            k_l = 2.0 / (preact_ub + 1.0).clamp(min=eps)
-            b_l = k_l - 1.0
-            lower_d = torch.where(mask_cross_both, k_l, lower_d)
+            s_l = 2.0 / (u + 1.0).clamp(min=eps)
+            b_l = s_l - 1.0
+            lower_d = torch.where(mask_cross_both, s_l, lower_d)
             lower_b = torch.where(mask_cross_both, b_l, lower_b)
-
-        
-        upper_d = upper_d.unsqueeze(1)
-        lower_d = lower_d.unsqueeze(1)
 
         uA = lA = None
         ubias = lbias = 0
+
+        upper_d = upper_d.unsqueeze(1)
+        lower_d = lower_d.unsqueeze(1)
 
         if last_uA is not None:
             pos_uA = last_uA.clamp(min=0)
             neg_uA = last_uA.clamp(max=0)
             uA = upper_d * pos_uA + lower_d * neg_uA
-           
+
             mult_pos = pos_uA.view(last_uA.size(0), last_uA.size(1), -1)
             mult_neg = neg_uA.view(last_uA.size(0), last_uA.size(1), -1)
             ubias = mult_pos.matmul(upper_b.view(upper_b.size(0), -1, 1)).squeeze(-1)
             ubias = ubias + mult_neg.matmul(lower_b.view(lower_b.size(0), -1, 1)).squeeze(-1)
 
         if last_lA is not None:
-            neg_lA = last_lA.clamp(max=0)
             pos_lA = last_lA.clamp(min=0)
+            neg_lA = last_lA.clamp(max=0)
             lA = upper_d * neg_lA + lower_d * pos_lA
-            
-            mult_neg = neg_lA.view(last_lA.size(0), last_lA.size(1), -1)
+
             mult_pos = pos_lA.view(last_lA.size(0), last_lA.size(1), -1)
-            lbias = mult_neg.matmul(upper_b.view(upper_b.size(0), -1, 1)).squeeze(-1)
-            lbias = lbias + mult_pos.matmul(lower_b.view(lower_b.size(0), -1, 1)).squeeze(-1)
+            mult_neg = neg_lA.view(last_lA.size(0), last_lA.size(1), -1)
+            lbias = mult_pos.matmul(lower_b.view(lower_b.size(0), -1, 1)).squeeze(-1)
+            lbias = lbias + mult_neg.matmul(upper_b.view(upper_b.size(0), -1, 1)).squeeze(-1)
 
         return uA, ubias, lA, lbias
 
